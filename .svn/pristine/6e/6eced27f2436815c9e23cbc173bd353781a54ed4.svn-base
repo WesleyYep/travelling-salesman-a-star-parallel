@@ -1,0 +1,168 @@
+package pttask;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.moeaframework.problem.tsplib.DistanceTable;
+import org.moeaframework.problem.tsplib.TSPPanel;
+import org.moeaframework.problem.tsplib.Node;
+import org.moeaframework.problem.tsplib.NodeCoordinates;
+
+import pt.runtime.CurrentTask;
+import pt.runtime.TaskID;
+import pt.runtime.TaskIDGroup;
+import pu.RedLib.Reduction;
+import tsp.State1;
+import tsp.Solver;
+import tsp.MainRunner;
+
+import tsp.AbstractSolver;
+import heuristic.Heuristic;
+import util.StateCompare;
+import util.Problem;
+
+/**
+ * Algorithm based on Parallel multithreaded IDA* heuristic search: algorithm design and performance evaluation article
+ */
+public class IDAStarSolverParallel extends AbstractSolver {
+	
+	private AtomicBoolean finishFlag;
+	private double bound;
+	private State1 finalState;
+
+	private long lowestThreadId = Long.MAX_VALUE;
+	
+	public IDAStarSolverParallel(Heuristic heuristic, DistanceTable table) {
+		super(heuristic, table);
+		finishFlag = new AtomicBoolean();
+		finishFlag.set(false);
+		bound = 0;
+	}
+	
+	public State1 search() {
+		//Two phase algorithm
+		
+		//first phase, do a depth-limited breath first search to generate
+		//a queue of state to perform IDA*
+		ConcurrentLinkedQueue<State1> queue = generateQueue(table);
+
+		//second phase
+		//perform IDA* on each of the state in the queue until it finds the goal state
+		while (!finishFlag.get()) {
+			TaskIDGroup<Double> g = new TaskIDGroup<Double>(queue.size());
+
+			for(State1 s: queue) {
+			    TaskID<Double> id = parallelIDAStar(s,table);
+			    g.add(id);
+			}
+			try {
+				g.waitTillFinished();
+				bound = g.getReturnResult(Reduction.DoubleMIN);
+			} catch (ExecutionException e) {
+				e.printStackTrace();
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			
+		}
+		return finalState;
+	}
+	
+	private ConcurrentLinkedQueue<State1> generateQueue(DistanceTable table) {
+		ConcurrentLinkedQueue<State1> result = new ConcurrentLinkedQueue<State1>();
+		int initialAndGoal = table.listNodes()[0];
+		State1 rootState = new State1(initialAndGoal, table.listNodes().length);
+		result.offer(rootState);
+		double maxH = Double.MAX_VALUE;
+		
+		//work out how many iteration for the depth
+		int iteration = 1;
+		int depth = 1;
+		int permutation = table.listNodes().length-1;
+		int temp = 1;
+		for (int i = 0; i<depth; i++) {
+			temp *= (permutation-i);
+			iteration += temp;
+		    
+		}
+		
+		
+		//depth limited breath search and store the state in the queue
+		for (int i = 0; i<iteration; i++) {
+			State1 currentState = result.poll();
+			//expand the node by adding all neighbours to queue
+			for (int s : table.getNeighborsOf(currentState.getCurrentCity())) {
+				if  (currentState.pathContains(s)) {
+					continue;
+				}
+				double g = currentState.getCurrentTourDistance() + Math.round(Problem.getDistanceBetween(table,currentState.getCurrentCity(), s));
+				double h = Math.round((heuristic.heuristicCost(s, table, currentState.getCities(), currentState)));
+				
+				if (h < maxH) maxH = h;
+				
+				result.offer(new State1(currentState, s, g, 0));
+			}
+		}
+		bound = maxH;
+		
+		return result;
+	}
+	
+	/*
+	 * Wrapper method to utilise ParaTask and perform the search on the state given and return a minimum cost that it found during the search
+	 */
+	TASK private double parallelIDAStar(State1 startState, DistanceTable table) {
+		if (Thread.currentThread().getId() < lowestThreadId) {
+			lowestThreadId = Thread.currentThread().getId();
+		}
+		
+		double t = search(startState,startState.getCurrentTourDistance(),bound,table);
+		
+		if (t == -1) {
+			finishFlag.compareAndSet(false, true);
+		}
+		
+		if ( t== Double.MAX_VALUE) {
+			finishFlag.compareAndSet(false, true);
+		}
+		return t;
+	}
+	
+	/*
+	 * recursive depth first search for IDA* algorithm
+	 */
+	private double search(State1 state, double g, double bound, DistanceTable table) {
+		double f = g + (int) heuristic.heuristicCost(state.getCurrentCity(), table, state.getCities(), state);
+		State1 currentState = state;
+		if ( f > bound) return f;
+		
+		if (currentState.getCities().size() == table.listNodes().length) {
+			int initialAndGoal = table.listNodes()[0];
+			currentState = new State1(currentState, initialAndGoal, currentState.getCurrentTourDistance() + Math.round(Problem.getDistanceBetween(table,currentState.getCurrentCity(), initialAndGoal)),0);
+			
+			List<Integer> result = currentState.getCities();
+			finalState = currentState;
+			return -1.0;
+		}
+		double min = Double.MAX_VALUE;
+
+		for (int s : table.getNeighborsOf(currentState.getCurrentCity())) {
+			if  (currentState.pathContains(s)) {
+				continue;
+			}
+			double currentDistance = currentState.getCurrentTourDistance() + Math.round(Problem.getDistanceBetween(table,currentState.getCurrentCity(), s));
+			State1 tempState = new State1(currentState, s, currentDistance, 0);
+			notifyObservers(tempState, (int)(Thread.currentThread().getId() - lowestThreadId));
+			double cost = Math.round(Problem.getDistanceBetween(table,currentState.getCurrentCity(), s));
+			double t = search(tempState, g + cost, bound,table);
+			if (t == -1.0) return -1.0;
+			if (t < min) min = t;
+		} 
+		return min;
+	}
+}

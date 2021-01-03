@@ -1,0 +1,184 @@
+package pttask;
+
+import java.util.PriorityQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import util.StateCompare;
+import tsp.State1;
+import util.Channel;
+import util.Problem;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+
+import org.moeaframework.problem.tsplib.DistanceTable;
+
+import pt.runtime.CurrentTask;
+import pt.runtime.TaskID;
+import pt.runtime.TaskIDGroup;
+
+import heuristic.Heuristic;
+import tsp.AbstractSolver;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.BrokenBarrierException;
+/**
+ * Hash Distributed A*
+ * @author Chang Kon Han
+ * @author Wesley Yep
+ * @author John Law 
+ */
+
+public class AStarHDA extends AbstractSolver {
+	
+	// fast for read. slow for write
+	private Map<Long, Channel<State1>> channels = new ConcurrentHashMap<Long, Channel<State1>>();
+	private Queue<Thread> threads = new ConcurrentLinkedQueue<Thread>();
+	
+	private State1 finalState;
+	
+	private AtomicBoolean discovered = new AtomicBoolean(false);
+	private AtomicBoolean initialised = new AtomicBoolean(false);
+	private CountDownLatch latch = new CountDownLatch(Runtime.getRuntime().availableProcessors());
+	
+	public AStarHDA(Heuristic heuristic, DistanceTable table) {
+		super(heuristic, table);
+	}
+	
+	public State1 search() {
+		TaskIDGroup taskGroup = loop();
+		
+		try {
+			taskGroup.waitTillFinished();
+		} catch (Exception e) {
+			// interrupted
+		}
+		return finalState;
+	}
+	
+	TASK(*) public void loop() {
+		// create "own" open and closed list
+		
+		// open list
+		PriorityQueue<State1> open = new PriorityQueue<State1>(1, new StateCompare());
+		
+		// retrieve relative thread id
+		long id = CurrentTask.relativeID();
+		
+		// create message queue
+		Channel<State1> channel = new Channel<State1>(id);
+		
+		// place into shared channels list
+		channels.put(id, channel);
+		
+		// initial thread add to processor. returns previous value
+		if (!initialised.getAndSet(true)) {
+			open.add(new State1(initialAndGoal, table.listNodes().length)); //initialise current state
+		}
+		
+		threads.add(Thread.currentThread());
+		
+		//long iteration = 0;
+		// each processor executes the loop until an optimal solution is found
+		while (true) {
+			if (discovered.get() && channel.isEmpty()) {
+				State1 state = open.peek();
+				if (state == null || state.getCities().size() == table.listNodes().length + 1 && state.getCurrentTourDistance() > finalState.getCurrentTourDistance()) {
+					try {
+						CurrentTask.barrier();
+						return;
+					} catch (Exception e) {
+					}
+				}
+			}
+			
+			if (!channel.isEmpty()) {
+				// message queue is not empty
+				State1 state = channel.receive();
+				
+				// add channel message to open list
+				open.add(state);
+			} else {
+				// get highest priority state
+				State1 state = open.poll();
+				
+				if (state == null) {
+					// go to sleep until channel is not empty
+					try {
+						channel.callWait();
+					} catch (InterruptedException e) {
+						// got interrupted while waiting
+					}
+					// woken from sleep. it has received something from channel. redo check
+					continue;
+				}
+				
+				// notify observers
+				notifyObservers(state, CurrentTask.relativeID());
+				//MainRunner.display(state);
+				
+				// check if it has been completed
+				if (state.getCities().size() == table.listNodes().length + 1) {
+					if (finalState == null) {
+						finalState = state;
+						discovered.set(true);
+						
+						// wake up all waiting threads by channel
+						for (Map.Entry<Long, Channel<State1>> e : channels.entrySet()) {
+							Channel<State1> ch = e.getValue();
+							if (ch.getIsWaiting()) {
+								ch.callNotifyAll();
+							}
+						}
+					} else if (state.getCurrentTourDistance() < finalState.getCurrentTourDistance()) {
+						finalState = state;
+					}
+				} else if (state.getCities().size() == table.listNodes().length) {
+					//add the path back to the initial city
+					double g = state.getCurrentTourDistance() + Problem.getDistanceBetween(table, state.getCurrentCity(), initialAndGoal);
+					open.add(new State1(state, initialAndGoal, g,0));
+				}
+				
+				// expand
+				// expand the node by adding all neighbours to queue
+				for (int s : table.getNeighborsOf(state.getCurrentCity())) {
+					if  (state.pathContains(s)) {
+						continue;
+					}
+					//evaluate the g value of the state
+					double g = state.getCurrentTourDistance() + Problem.getDistanceBetween(table, state.getCurrentCity(), s);
+
+					//evaluate the h value of the state
+					double h = heuristic.heuristicCost(s, table, state.getCities(), state);
+					//store the f value in the map
+					double fValue = g + h;
+					
+					// add neighbours to appropriate processors open list
+					State1 newState = new State1(state, s, g, fValue);
+					long processorId = hashFunction(newState);
+					
+					Channel<State1> c = channels.get(processorId);
+					
+					if (discovered.get() && newState.getCurrentTourDistance() < finalState.getCurrentTourDistance()) {
+						open.add(newState);
+					} else {
+						c.send(newState);
+						
+						// notify any sleeping threads
+						if (c.getIsWaiting()) {
+							c.callNotifyAll();
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	public long hashFunction(State1 state) {
+		int size = channels.size();
+		int index = state.hashCode() % size;
+		List<Long> processes = new ArrayList<Long>(channels.keySet());
+		return processes.get(index);
+	}
+	
+}

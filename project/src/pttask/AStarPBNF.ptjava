@@ -1,0 +1,86 @@
+package pttask;
+
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.*;
+
+import org.moeaframework.problem.tsplib.DistanceTable;
+import org.moeaframework.problem.tsplib.TSPPanel;
+
+import java.lang.reflect.*;
+import pt.runtime.GuiThread;
+import tsp.State1;
+
+import java.util.concurrent.BlockingQueue;
+import java.util.ArrayList;
+import java.util.List;
+
+import util.StateCompare;
+import util.Channel;
+
+/**
+ * Implementation of Parallel Best-N Block First
+ * @author Chang Kon Han
+ * @author Wesley Yep
+ * @author John Law
+ * @see https://pdfs.semanticscholar.org/36d9/e216a74b7e11fce1c69067564613acce8505.pdf
+ */
+
+public class AStarPBNF {
+	
+	// used to maintain which city is used for abstraction function
+	private int city;
+	
+	// open list
+	private PriorityBlockingQueue<State1> open = new PriorityBlockingQueue<State1>(1, new StateCompare());
+	
+	private DistanceTable table;
+	private TSPPanel panel;
+	
+	// keep track of done
+	private AtomicBoolean done = new AtomicBoolean(false);
+	
+	public AStarPBNF(DistanceTable table, TSPPanel panel) {
+		this.table = table;
+		this.panel = panel;
+	}
+	
+	public void search() {
+		// determine initial node
+		int initialAndGoal = table.listNodes()[0];
+		// insert initial node into open
+		open.add(new State1(initialAndGoal, table.listNodes().length));
+	}
+	
+	TASK(*) public void threadsearch() {
+		//NBlock block = null;
+//		while (!done.get()) {
+//			block = nextnblock(block);
+//			int exp = 0;
+//			
+//			while (!shouldSwitch(block, exp)) {
+//				
+//			}
+//			
+//		}
+	}
+	
+//	public boolean shouldSwitch(NBlock block, int exp) {
+//		return false;
+//	}
+//	
+//	public NBlock nextnblock(NBlock block) {
+//		return null;
+//	}
+	
+	/**
+	 * Given a state, returns an abstract state. Abstraction function which takes the city and returns its index
+	 * @return abstract state
+	 */
+	
+	public int abstractionFunction(State1 state) {
+		return 0;
+	}
+	
+}

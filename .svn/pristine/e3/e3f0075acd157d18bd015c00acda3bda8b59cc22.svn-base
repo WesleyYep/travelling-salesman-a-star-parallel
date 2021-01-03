@@ -1,0 +1,103 @@
+package pttask;
+
+import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import org.moeaframework.problem.tsplib.DistanceTable;
+import tsp.State1;
+import util.StateCompare;
+import tsp.AbstractSolver;
+import heuristic.Heuristic;
+import pt.runtime.*;
+import util.Problem;
+
+public class AStarSolverParallel extends AbstractSolver {
+	
+	private State1 finalState;
+	private PriorityBlockingQueue<State1> frontier;
+	//countdown latch with total number of threads
+	private CountDownLatch latch;
+	
+	public AStarSolverParallel(Heuristic heuristic, DistanceTable table) {
+		super(heuristic, table);
+		//countdown latch with total number of threads
+		latch = new CountDownLatch (Runtime.getRuntime().availableProcessors());
+	}
+	
+	public State1 search() {
+		frontier = new PriorityBlockingQueue<State1>(1, new StateCompare());
+		frontier.add(new State1(initialAndGoal, table.listNodes().length)); //initialise current state
+
+		//create a multi task with data parallelism
+		TaskIDGroup task = loop();
+		try {
+			task.waitTillFinished();
+		} catch (Exception e) { e.printStackTrace(); }
+		//finish();
+		return finalState;
+	}
+	
+	/**
+	 * This keeps calling expanding nodes until we find the solution
+	 */
+	TASK(*) public void loop() {
+		int iteration = 0;
+		boolean localFlag = false; //this deals with the parallel termination condition, along with countdownlatch
+		//expand minimum state each iteration
+		while (latch.getCount() != 0) {
+			iteration++;
+			localFlag = expand(localFlag);
+	//		System.out.println("Iteration:" + iteration);
+		}
+	//	System.out.println("Thread: " + CurrentTask.relativeID() + " has finished!");
+	}
+	
+	/**
+	 * This method expands a single node at the front of the priority queue
+	 * return: true if thread should still be searching, otherwise false
+	 */
+	public boolean expand(boolean localFlag) {		
+		State1 currentState;
+		//finding the best f value in the open list and set it as current.
+		currentState = frontier.poll();
+		if (currentState == null) {
+			//keep checking in case there is more work to do later
+			return localFlag;
+		}
+		//check if we have found a possible solution
+		if (currentState.getCities().size() == table.listNodes().length + 1) {
+			if (finalState == null || currentState.getCurrentTourDistance() < finalState.getCurrentTourDistance()) {
+				foundGoalState(currentState);
+			}
+		} else if (currentState.getCities().size() == table.listNodes().length) {
+			//add the path back to the initial city
+			double g = currentState.getCurrentTourDistance() + Problem.getDistanceBetween(table, currentState.getCurrentCity(), initialAndGoal);
+			frontier.add(new State1(currentState, initialAndGoal, g,0));
+		}
+		//expand the node by adding all neighbours to queue
+		for (int s : table.getNeighborsOf(currentState.getCurrentCity())) {
+			if  (currentState.pathContains(s)) {
+				continue;
+			}
+			//evaluate the g value of the state
+			double g = currentState.getCurrentTourDistance() + Problem.getDistanceBetween(table, currentState.getCurrentCity(), s);
+
+			//evaluate the h value of the state
+			double h = heuristic.heuristicCost(s, table, currentState.getCities(), currentState);
+			//store the f value in the map
+			double fValue = g + h;
+			frontier.add(new State1(currentState, s, g, fValue));
+		}
+		
+		notifyObservers(currentState, CurrentTask.relativeID());
+		//set the local flag to true (finished) and count the latch down if our current state tour distance is greater than finalState tour distance
+		if (finalState != null && !localFlag && currentState.getFValue() > finalState.getCurrentTourDistance()) {
+			latch.countDown();
+			localFlag = true;
+		}
+		return localFlag;
+	}
+	
+	public void foundGoalState(State1 newFinalState) {
+		finalState = newFinalState;
+	}
+}
